@@ -1,8 +1,8 @@
 # Ce fichier sera complété pendant le tutoriel.
 # L'objectif est justement d'apprendre à ignorer les fichiers générés.
 
-build/
+gitbuild/
 install/
-log/git 
+log/git
 __pycache__/
 .venv/
