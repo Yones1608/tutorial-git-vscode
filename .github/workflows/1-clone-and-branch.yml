@@ -1,0 +1,118 @@
+name: Step 1 # Cloner et publier une branche
+
+on:
+  create:
+  workflow_dispatch:
+
+concurrency:
+  group: git-vscode-step-1-${{ github.repository }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write
+  issues: write
+
+env:
+  STEP_2_FILE: ".github/steps/2-working-tree-staging-commit.md"
+  TOOLKIT_REPOSITORY: "ENSTARobotics/exercise-toolkit-fr"
+  TOOLKIT_REF: "19f8395fee473aca8af74039182a41cdda9ab0e3"
+
+jobs:
+  find_exercise:
+    if: |
+      !github.event.repository.is_template &&
+      (
+        (github.event_name == 'create' && github.event.ref_type == 'branch' && github.event.ref == 'feature/robot-status') ||
+        (github.event_name == 'workflow_dispatch' && github.ref_name == 'feature/robot-status')
+      )
+    name: Retrouver l'Issue de l'exercice
+    uses: ENSTARobotics/exercise-toolkit-fr/.github/workflows/find-exercise-issue.yml@19f8395fee473aca8af74039182a41cdda9ab0e3
+
+  post_next_step_content:
+    name: Afficher l'étape 2
+    needs: [find_exercise]
+    runs-on: ubuntu-latest
+    env:
+      ISSUE_REPOSITORY: ${{ github.repository }}
+      ISSUE_NUMBER: ${{ needs.find_exercise.outputs.issue-number }}
+
+    steps:
+      - name: Récupérer le contenu pédagogique depuis main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+
+      - name: Récupérer les templates français
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.TOOLKIT_REPOSITORY }}
+          path: exercise-toolkit-fr
+          ref: ${{ env.TOOLKIT_REF }}
+
+      - name: Confirmer la publication de la branche
+        uses: GrantBirki/comment@608e41b19bc973020ec0e189ebfdae935d7fe0cc # v2.1.1
+        with:
+          repository: ${{ env.ISSUE_REPOSITORY }}
+          issue-number: ${{ env.ISSUE_NUMBER }}
+          file: exercise-toolkit-fr/markdown-templates/step-feedback/step-finished-prepare-next-step.md
+          vars: |
+            next_step_number: 2
+
+      - name: Publier l'étape 2
+        uses: GrantBirki/comment@608e41b19bc973020ec0e189ebfdae935d7fe0cc # v2.1.1
+        with:
+          repository: ${{ env.ISSUE_REPOSITORY }}
+          issue-number: ${{ env.ISSUE_NUMBER }}
+          file: ${{ env.STEP_2_FILE }}
+
+      - name: Indiquer que la progression est surveillée
+        uses: GrantBirki/comment@608e41b19bc973020ec0e189ebfdae935d7fe0cc # v2.1.1
+        with:
+          repository: ${{ env.ISSUE_REPOSITORY }}
+          issue-number: ${{ env.ISSUE_NUMBER }}
+          file: exercise-toolkit-fr/markdown-templates/step-feedback/watching-for-progress.md
+
+      - name: Activer l'étape 2 et rattraper un commit déjà poussé
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          current_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/1-clone-and-branch.yml" --jq '.state')"
+          if [ "$current_state" = "active" ]; then
+            gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/1-clone-and-branch.yml/disable"
+          fi
+
+          next_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/2-working-tree-staging-commit.yml" --jq '.state')"
+          if [ "$next_state" != "active" ]; then
+            gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/2-working-tree-staging-commit.yml/enable"
+          fi
+
+          for attempt in {1..10}; do
+            next_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/2-working-tree-staging-commit.yml" --jq '.state')"
+            if [ "$next_state" = "active" ]; then
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$next_state" != "active" ]; then
+            echo "Le workflow suivant n'est pas devenu actif à temps."
+            exit 1
+          fi
+
+          # Laisse à GitHub le temps d'enregistrer un événement déjà parti.
+          sleep 2
+
+          if gh api "repos/${GITHUB_REPOSITORY}/contents/robot/config.yaml?ref=feature/robot-status" --jq '.content' > /tmp/config.b64 2>/dev/null; then
+            tr -d '\n' < /tmp/config.b64 | base64 -d > /tmp/config.yaml
+            if grep -Eq '^[[:space:]]*max_speed:[[:space:]]*0\.8[[:space:]]*$' /tmp/config.yaml; then
+              head_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/feature/robot-status" --jq '.object.sha')"
+              run_count="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/2-working-tree-staging-commit.yml/runs?branch=feature/robot-status&head_sha=$head_sha&per_page=1" --jq '.total_count')"
+              if [ "$run_count" -eq 0 ]; then
+                echo "La modification est déjà publiée : lancement immédiat de l'étape 2."
+                gh workflow run 2-working-tree-staging-commit.yml --ref feature/robot-status
+              fi
+            fi
+          fi

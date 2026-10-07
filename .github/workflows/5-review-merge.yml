@@ -1,0 +1,134 @@
+name: Step 5 # Relecture et merge
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: "Numéro de la pull request à rattraper"
+        required: true
+        type: string
+
+concurrency:
+  group: git-vscode-step-5-${{ github.repository }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+  pull-requests: write
+
+env:
+  REVIEW_FILE: ".github/steps/x-review.md"
+  TOOLKIT_REPOSITORY: "ENSTARobotics/exercise-toolkit-fr"
+  TOOLKIT_REF: "19f8395fee473aca8af74039182a41cdda9ab0e3"
+
+jobs:
+  resolve_pr:
+    if: |
+      !github.event.repository.is_template
+    name: Retrouver la pull request
+    runs-on: ubuntu-latest
+    outputs:
+      pr-number: ${{ steps.resolve.outputs.pr-number }}
+      merged: ${{ steps.resolve.outputs.merged }}
+      valid: ${{ steps.resolve.outputs.valid }}
+    steps:
+      - name: Résoudre le contexte de la pull request
+        id: resolve
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            let pr;
+
+            if (context.eventName === "pull_request") {
+              pr = context.payload.pull_request;
+            } else {
+              const number = Number(context.payload.inputs["pr-number"]);
+              const response = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: number
+              });
+              pr = response.data;
+            }
+
+            const valid =
+              pr.head.ref === "feature/robot-status" &&
+              pr.base.ref === "main";
+
+            core.setOutput("pr-number", String(pr.number));
+            core.setOutput("merged", pr.merged ? "true" : "false");
+            core.setOutput("valid", valid ? "true" : "false");
+
+            if (!valid) {
+              core.setFailed("Cette pull request ne correspond pas aux branches attendues par le tutoriel.");
+            }
+
+  explain_unmerged_close:
+    needs: [resolve_pr]
+    if: needs.resolve_pr.outputs.valid == 'true' && needs.resolve_pr.outputs.merged != 'true'
+    name: Expliquer une fermeture sans merge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Répondre dans la pull request
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PR_NUMBER: ${{ needs.resolve_pr.outputs.pr-number }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.PR_NUMBER),
+              body: "Cette pull request a été fermée sans être mergée. Rouvre-la puis utilise Merge pull request lorsque le changement est prêt."
+            });
+
+  find_exercise:
+    needs: [resolve_pr]
+    if: needs.resolve_pr.outputs.valid == 'true' && needs.resolve_pr.outputs.merged == 'true'
+    name: Retrouver l'Issue de l'exercice
+    uses: ENSTARobotics/exercise-toolkit-fr/.github/workflows/find-exercise-issue.yml@19f8395fee473aca8af74039182a41cdda9ab0e3
+
+  post_review_content:
+    name: Publier le bilan dans la pull request
+    needs: [resolve_pr, find_exercise]
+    if: needs.resolve_pr.outputs.merged == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupérer le contenu pédagogique depuis main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+
+      - name: Publier le bilan final dans Conversation
+        uses: GrantBirki/comment@608e41b19bc973020ec0e189ebfdae935d7fe0cc # v2.1.1
+        with:
+          repository: ${{ github.repository }}
+          issue-number: ${{ needs.resolve_pr.outputs.pr-number }}
+          file: ${{ env.REVIEW_FILE }}
+
+      - name: Désactiver le dernier workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/5-review-merge.yml" --jq '.state')"
+          if [ "$state" = "active" ]; then
+            gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/5-review-merge.yml/disable"
+          fi
+
+  finish_exercise:
+    name: Terminer l'exercice
+    needs: [resolve_pr, find_exercise, post_review_content]
+    if: needs.resolve_pr.outputs.merged == 'true'
+    uses: ENSTARobotics/exercise-toolkit-fr/.github/workflows/finish-exercise.yml@19f8395fee473aca8af74039182a41cdda9ab0e3
+    with:
+      issue-url: ${{ needs.find_exercise.outputs.issue-url }}
+      exercise-title: "Git & VS Code"
+      toolkit-ref: "19f8395fee473aca8af74039182a41cdda9ab0e3"

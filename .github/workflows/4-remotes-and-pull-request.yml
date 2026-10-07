@@ -1,0 +1,274 @@
+name: Step 4 # Remote et pull request
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: "Numéro de la pull request à rattraper"
+        required: true
+        type: string
+
+concurrency:
+  group: git-vscode-step-4-${{ github.repository }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write
+  issues: write
+  pull-requests: write
+
+env:
+  STEP_5_FILE: ".github/steps/5-review-merge.md"
+  TOOLKIT_REPOSITORY: "ENSTARobotics/exercise-toolkit-fr"
+  TOOLKIT_REF: "19f8395fee473aca8af74039182a41cdda9ab0e3"
+
+jobs:
+  resolve_pr:
+    if: |
+      !github.event.repository.is_template
+    name: Retrouver la pull request
+    runs-on: ubuntu-latest
+    outputs:
+      pr-number: ${{ steps.resolve.outputs.pr-number }}
+      pr-url: ${{ steps.resolve.outputs.pr-url }}
+      merged: ${{ steps.resolve.outputs.merged }}
+      valid: ${{ steps.resolve.outputs.valid }}
+    steps:
+      - name: Résoudre le contexte de la pull request
+        id: resolve
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            let pr;
+
+            if (context.eventName === "pull_request") {
+              pr = context.payload.pull_request;
+            } else {
+              const number = Number(context.payload.inputs["pr-number"]);
+              if (!Number.isInteger(number) || number <= 0) {
+                core.setFailed("Numéro de pull request invalide.");
+                return;
+              }
+              const response = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: number
+              });
+              pr = response.data;
+            }
+
+            const valid =
+              pr.head.ref === "feature/robot-status" &&
+              pr.base.ref === "main";
+
+            core.setOutput("pr-number", String(pr.number));
+            core.setOutput("pr-url", pr.html_url);
+            core.setOutput("merged", pr.merged ? "true" : "false");
+            core.setOutput("valid", valid ? "true" : "false");
+
+            if (!valid) {
+              core.setFailed("Cette pull request ne correspond pas aux branches attendues par le tutoriel.");
+            }
+
+  find_exercise:
+    needs: [resolve_pr]
+    if: needs.resolve_pr.outputs.valid == 'true'
+    name: Retrouver l'Issue de l'exercice
+    uses: ENSTARobotics/exercise-toolkit-fr/.github/workflows/find-exercise-issue.yml@19f8395fee473aca8af74039182a41cdda9ab0e3
+
+  check_pull_request:
+    needs: [resolve_pr]
+    if: needs.resolve_pr.outputs.valid == 'true'
+    name: Vérifier la pull request
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Vérifier le contexte et les fichiers
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PR_NUMBER: ${{ needs.resolve_pr.outputs.pr-number }}
+        with:
+          script: |
+            const number = Number(process.env.PR_NUMBER);
+            const response = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: number
+            });
+            const pr = response.data;
+
+            const title = (pr.title || "").trim();
+            const bodyText = (pr.body || "").trim();
+            const titleOk = title.length >= 5 && !/^(test|update|changes|wip)$/i.test(title);
+            const bodyOk = bodyText.length >= 20;
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: number,
+              per_page: 100
+            });
+            const names = new Set(files.map(file => file.filename));
+            const configOk = names.has("robot/config.yaml");
+            const gitignoreOk = names.has(".gitignore");
+
+            const marker = "<!-- tutorial-git-vscode:pr-validation -->";
+            const icon = value => value ? "✅" : "❌";
+            const lines = [
+              marker,
+              "## Vérification de ta pull request",
+              "",
+              "Ton travail local est maintenant arrivé sur GitHub. Je vérifie la proposition directement ici.",
+              "",
+              "| Vérification | Résultat |",
+              "| --- | --- |",
+              "| Titre suffisamment explicite | " + icon(titleOk) + " |",
+              "| Description utile | " + icon(bodyOk) + " |",
+              "| Modification de robot/config.yaml | " + icon(configOk) + " |",
+              "| Mise à jour de .gitignore | " + icon(gitignoreOk) + " |",
+              ""
+            ];
+
+            const passed = titleOk && bodyOk && configOk && gitignoreOk;
+            lines.push(
+              passed
+                ? "Tout est bon. La dernière étape va apparaître dans cette conversation."
+                : "Corrige les éléments marqués ❌. Le bot revérifiera automatiquement la PR."
+            );
+
+            const body = lines.join("\n");
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              per_page: 100
+            });
+
+            const existing = comments.find(comment =>
+              comment.user?.login === "github-actions[bot]" &&
+              (comment.body || "").includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: number,
+                body
+              });
+            }
+
+            if (!passed) {
+              core.setFailed("La pull request n'est pas encore conforme.");
+            }
+
+  post_next_step_content:
+    name: Continuer le cours dans la pull request
+    needs: [resolve_pr, find_exercise, check_pull_request]
+    runs-on: ubuntu-latest
+    env:
+      ISSUE_NUMBER: ${{ needs.find_exercise.outputs.issue-number }}
+      PR_NUMBER: ${{ needs.resolve_pr.outputs.pr-number }}
+      PR_URL: ${{ needs.resolve_pr.outputs.pr-url }}
+
+    steps:
+      - name: Récupérer le contenu pédagogique depuis main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+
+      - name: Publier l'étape 5 dans la Conversation
+        if: needs.resolve_pr.outputs.merged != 'true'
+        uses: GrantBirki/comment@608e41b19bc973020ec0e189ebfdae935d7fe0cc # v2.1.1
+        with:
+          repository: ${{ github.repository }}
+          issue-number: ${{ env.PR_NUMBER }}
+          file: ${{ env.STEP_5_FILE }}
+
+      - name: Signaler une PR déjà mergée
+        if: needs.resolve_pr.outputs.merged == 'true'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PR_NUMBER: ${{ env.PR_NUMBER }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.PR_NUMBER),
+              body: "La pull request a déjà été mergée. Je rattrape automatiquement la progression et je finalise le tutoriel."
+            });
+
+      - name: Laisser une trace dans l'Issue du cours
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
+          PR_NUMBER: ${{ env.PR_NUMBER }}
+          PR_URL: ${{ env.PR_URL }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.ISSUE_NUMBER),
+              body: "✅ Ta pull request #" + process.env.PR_NUMBER + " est valide. La suite du tutoriel se déroule maintenant directement dans sa [Conversation](" + process.env.PR_URL + ")."
+            });
+
+      - name: Activer l'étape 5 et rattraper un merge déjà effectué
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ env.PR_NUMBER }}
+        run: |
+          set -euo pipefail
+
+          current_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/4-remotes-and-pull-request.yml" --jq '.state')"
+          if [ "$current_state" = "active" ]; then
+            gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/4-remotes-and-pull-request.yml/disable"
+          fi
+
+          next_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/5-review-merge.yml" --jq '.state')"
+          if [ "$next_state" != "active" ]; then
+            gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/5-review-merge.yml/enable"
+          fi
+
+          for attempt in {1..10}; do
+            next_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/5-review-merge.yml" --jq '.state')"
+            if [ "$next_state" = "active" ]; then
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$next_state" != "active" ]; then
+            echo "Le workflow suivant n'est pas devenu actif à temps."
+            exit 1
+          fi
+
+          # Laisse à GitHub le temps d'enregistrer un événement déjà parti.
+          sleep 2
+
+          merged="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER" --jq '.merged')"
+          if [ "$merged" = "true" ]; then
+            merge_sha="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/$PR_NUMBER" --jq '.merge_commit_sha')"
+            run_count="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/5-review-merge.yml/runs?head_sha=$merge_sha&per_page=1" --jq '.total_count')"
+            if [ "$run_count" -eq 0 ]; then
+              echo "Le merge a déjà eu lieu : lancement immédiat de l'étape 5."
+              gh workflow run 5-review-merge.yml --ref main -f pr-number="$PR_NUMBER"
+            fi
+          fi

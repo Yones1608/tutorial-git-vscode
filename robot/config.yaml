@@ -1,0 +1,4 @@
+robot:
+  name: "Mona"
+  max_speed: 0.4
+  mode: "simulation"

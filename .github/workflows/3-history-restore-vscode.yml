@@ -1,0 +1,196 @@
+name: Step 3 # Historique, restauration et VS Code
+
+on:
+  push:
+    branches:
+      - "feature/robot-status"
+    paths:
+      - ".gitignore"
+  workflow_dispatch:
+
+concurrency:
+  group: git-vscode-step-3-${{ github.repository }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write
+  issues: write
+
+env:
+  STEP_4_FILE: ".github/steps/4-remotes-and-pull-request.md"
+  TOOLKIT_REPOSITORY: "ENSTARobotics/exercise-toolkit-fr"
+  TOOLKIT_REF: "19f8395fee473aca8af74039182a41cdda9ab0e3"
+
+jobs:
+  find_exercise:
+    if: |
+      !github.event.repository.is_template &&
+      github.ref_name == 'feature/robot-status'
+    name: Retrouver l'Issue de l'exercice
+    uses: ENSTARobotics/exercise-toolkit-fr/.github/workflows/find-exercise-issue.yml@19f8395fee473aca8af74039182a41cdda9ab0e3
+
+  check_step_work:
+    name: Vérifier le deuxième commit
+    runs-on: ubuntu-latest
+    needs: [find_exercise]
+    env:
+      ISSUE_REPOSITORY: ${{ github.repository }}
+      ISSUE_NUMBER: ${{ needs.find_exercise.outputs.issue-number }}
+
+    steps:
+      - name: Récupérer la branche et l'historique
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: feature/robot-status
+          fetch-depth: 0
+
+      - name: Récupérer les templates français
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.TOOLKIT_REPOSITORY }}
+          path: exercise-toolkit-fr
+          ref: ${{ env.TOOLKIT_REF }}
+
+      - name: Retrouver le dernier commentaire de progression
+        id: find-last-comment
+        uses: peter-evans/find-comment@3eae4d37986fb5a8592848f6a574fdf654e61f9e # v3
+        with:
+          repository: ${{ env.ISSUE_REPOSITORY }}
+          issue-number: ${{ env.ISSUE_NUMBER }}
+          direction: last
+
+      - name: Indiquer que le travail est en cours de vérification
+        uses: GrantBirki/comment@608e41b19bc973020ec0e189ebfdae935d7fe0cc # v2.1.1
+        with:
+          repository: ${{ env.ISSUE_REPOSITORY }}
+          issue-number: ${{ env.ISSUE_NUMBER }}
+          comment-id: ${{ steps.find-last-comment.outputs.comment-id }}
+          file: exercise-toolkit-fr/markdown-templates/step-feedback/checking-work.md
+          edit-mode: replace
+
+      - name: Vérifier les entrées de .gitignore
+        id: check-gitignore
+        continue-on-error: true
+        shell: bash
+        run: |
+          grep -Fxq 'build/' .gitignore
+          grep -Fxq 'install/' .gitignore
+          grep -Fxq 'log/' .gitignore
+          grep -Fxq '__pycache__/' .gitignore
+          grep -Fxq '.venv/' .gitignore
+
+      - name: Vérifier que les deux modifications sont dans deux commits distincts
+        id: check-history
+        continue-on-error: true
+        shell: bash
+        run: |
+          config_commit="$(git log -1 --format=%H -- robot/config.yaml)"
+          gitignore_commit="$(git log -1 --format=%H -- .gitignore)"
+
+          echo "Dernier commit de robot/config.yaml : $config_commit"
+          echo "Dernier commit de .gitignore : $gitignore_commit"
+
+          test -n "$config_commit"
+          test -n "$gitignore_commit"
+          test "$config_commit" != "$gitignore_commit"
+
+      - name: Publier les résultats
+        uses: GrantBirki/comment@608e41b19bc973020ec0e189ebfdae935d7fe0cc # v2.1.1
+        with:
+          repository: ${{ env.ISSUE_REPOSITORY }}
+          issue-number: ${{ env.ISSUE_NUMBER }}
+          comment-id: ${{ steps.find-last-comment.outputs.comment-id }}
+          edit-mode: replace
+          file: exercise-toolkit-fr/markdown-templates/step-feedback/step-results-table.md
+          vars: |
+            step_number: 3
+            results_table:
+              - description: "Les fichiers générés sont ignorés"
+                passed: ${{ steps.check-gitignore.outcome == 'success' }}
+              - description: "Les deux modifications ont été enregistrées dans deux commits distincts"
+                passed: ${{ steps.check-history.outcome == 'success' }}
+
+      - name: Arrêter si une vérification échoue
+        if: contains(steps.*.outcome, 'failure')
+        run: exit 1
+
+  post_next_step_content:
+    name: Afficher l'étape 4
+    needs: [find_exercise, check_step_work]
+    runs-on: ubuntu-latest
+    env:
+      ISSUE_REPOSITORY: ${{ github.repository }}
+      ISSUE_NUMBER: ${{ needs.find_exercise.outputs.issue-number }}
+
+    steps:
+      - name: Récupérer le contenu pédagogique depuis main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+
+      - name: Récupérer les templates français
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.TOOLKIT_REPOSITORY }}
+          path: exercise-toolkit-fr
+          ref: ${{ env.TOOLKIT_REF }}
+
+      - name: Confirmer l'étape terminée
+        uses: GrantBirki/comment@608e41b19bc973020ec0e189ebfdae935d7fe0cc # v2.1.1
+        with:
+          repository: ${{ env.ISSUE_REPOSITORY }}
+          issue-number: ${{ env.ISSUE_NUMBER }}
+          file: exercise-toolkit-fr/markdown-templates/step-feedback/step-finished-prepare-next-step.md
+          vars: |
+            next_step_number: 4
+
+      - name: Publier l'étape 4
+        uses: GrantBirki/comment@608e41b19bc973020ec0e189ebfdae935d7fe0cc # v2.1.1
+        with:
+          repository: ${{ env.ISSUE_REPOSITORY }}
+          issue-number: ${{ env.ISSUE_NUMBER }}
+          file: ${{ env.STEP_4_FILE }}
+
+      - name: Activer l'étape 4 et rattraper une PR déjà ouverte
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          current_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/3-history-restore-vscode.yml" --jq '.state')"
+          if [ "$current_state" = "active" ]; then
+            gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/3-history-restore-vscode.yml/disable"
+          fi
+
+          next_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/4-remotes-and-pull-request.yml" --jq '.state')"
+          if [ "$next_state" != "active" ]; then
+            gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/4-remotes-and-pull-request.yml/enable"
+          fi
+
+          for attempt in {1..10}; do
+            next_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/4-remotes-and-pull-request.yml" --jq '.state')"
+            if [ "$next_state" = "active" ]; then
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$next_state" != "active" ]; then
+            echo "Le workflow suivant n'est pas devenu actif à temps."
+            exit 1
+          fi
+
+          # Laisse à GitHub le temps d'enregistrer un événement déjà parti.
+          sleep 2
+
+          head_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/feature/robot-status" --jq '.object.sha')"
+          pr_number="$(gh pr list --head feature/robot-status --base main --state all --limit 20 --json number,headRefOid --jq ".[] | select(.headRefOid == \"$head_sha\") | .number" | head -n 1)"
+
+          if [ -n "$pr_number" ]; then
+            run_count="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/4-remotes-and-pull-request.yml/runs?head_sha=$head_sha&per_page=1" --jq '.total_count')"
+            if [ "$run_count" -eq 0 ]; then
+              echo "La pull request #$pr_number existe déjà : lancement immédiat de l'étape 4."
+              gh workflow run 4-remotes-and-pull-request.yml --ref main -f pr-number="$pr_number"
+            fi
+          fi

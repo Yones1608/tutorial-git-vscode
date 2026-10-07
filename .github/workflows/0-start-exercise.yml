@@ -1,0 +1,108 @@
+name: Step 0 # Démarrer l'exercice
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+env:
+  STEP_1_FILE: ".github/steps/1-clone-and-branch.md"
+  TOOLKIT_REPOSITORY: "ENSTARobotics/exercise-toolkit-fr"
+  TOOLKIT_REF: "19f8395fee473aca8af74039182a41cdda9ab0e3"
+
+jobs:
+  start_exercise:
+    if: |
+      !github.event.repository.is_template
+    name: Démarrer l'exercice
+    uses: ENSTARobotics/exercise-toolkit-fr/.github/workflows/start-exercise.yml@19f8395fee473aca8af74039182a41cdda9ab0e3
+    with:
+      exercise-title: "Git & VS Code"
+      intro-message: "Tu vas apprendre à travailler avec un dépôt GitHub depuis ton ordinateur et VS Code. Chaque commande et notion sera expliquée avant sa première utilisation."
+      manage-workflows: true
+      toolkit-ref: "19f8395fee473aca8af74039182a41cdda9ab0e3"
+
+  post_next_step_content:
+    name: Afficher l'étape 1
+    runs-on: ubuntu-latest
+    needs: [start_exercise]
+    env:
+      ISSUE_REPOSITORY: ${{ github.repository }}
+      ISSUE_NUMBER: ${{ needs.start_exercise.outputs.issue-number }}
+
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+
+      - name: Récupérer les templates français
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ env.TOOLKIT_REPOSITORY }}
+          path: exercise-toolkit-fr
+          ref: ${{ env.TOOLKIT_REF }}
+
+      - name: Publier l'étape 1
+        uses: GrantBirki/comment@608e41b19bc973020ec0e189ebfdae935d7fe0cc # v2.1.1
+        with:
+          repository: ${{ env.ISSUE_REPOSITORY }}
+          issue-number: ${{ env.ISSUE_NUMBER }}
+          file: ${{ env.STEP_1_FILE }}
+          vars: |
+            full_repo_name: ${{ github.repository }}
+            repo_name: ${{ github.event.repository.name }}
+
+      - name: Indiquer que la progression est surveillée
+        uses: GrantBirki/comment@608e41b19bc973020ec0e189ebfdae935d7fe0cc # v2.1.1
+        with:
+          repository: ${{ env.ISSUE_REPOSITORY }}
+          issue-number: ${{ env.ISSUE_NUMBER }}
+          file: exercise-toolkit-fr/markdown-templates/step-feedback/watching-for-progress.md
+
+      - name: Activer l'étape 1 et rattraper une branche déjà publiée
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          current_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/0-start-exercise.yml" --jq '.state')"
+          if [ "$current_state" = "active" ]; then
+            gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/0-start-exercise.yml/disable"
+          fi
+
+          next_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/1-clone-and-branch.yml" --jq '.state')"
+          if [ "$next_state" != "active" ]; then
+            gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/1-clone-and-branch.yml/enable"
+          fi
+
+          for attempt in {1..10}; do
+            next_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/1-clone-and-branch.yml" --jq '.state')"
+            if [ "$next_state" = "active" ]; then
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$next_state" != "active" ]; then
+            echo "Le workflow suivant n'est pas devenu actif à temps."
+            exit 1
+          fi
+
+          # Laisse à GitHub le temps d'enregistrer un événement déjà parti.
+          sleep 2
+
+          if head_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/feature/robot-status" --jq '.object.sha' 2>/dev/null)"; then
+            run_count="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/1-clone-and-branch.yml/runs?branch=feature/robot-status&head_sha=$head_sha&per_page=1" --jq '.total_count')"
+            if [ "$run_count" -eq 0 ]; then
+              echo "La branche existe déjà : lancement immédiat de l'étape 1."
+              gh workflow run 1-clone-and-branch.yml --ref feature/robot-status
+            fi
+          else
+            echo "Aucune branche feature/robot-status à rattraper."
+          fi
