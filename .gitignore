@@ -1,6 +1,7 @@
 # Ce fichier sera complété pendant le tutoriel.
 # L'objectif est justement d'apprendre à ignorer les fichiers générés.
 
+
 gitbuild/
 install/
 log/git
