@@ -2,8 +2,4 @@
 # L'objectif est justement d'apprendre à ignorer les fichiers générés.
 
 
-gitbuild/
-install/
-log/git
-__pycache__/
-.venv/
+gitbuild/install/log/git__pycache__/.venv/
